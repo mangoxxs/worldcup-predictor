@@ -1,12 +1,20 @@
 ---
 name: worldcup-predictor
 description: >
-  Multi-source football match score prediction engine for World Cup and other international tournaments. Replaces Chinese pundit consensus with three-layer weighted sources: betting Correct Score market (40%), AI statistical models like Opta (35%), and international analyst consensus (25%). Applies five-dimensional correction factors (league quality, tactics, tournament stage, history, venue). Use when predicting match scores, analyzing football fixtures, forecasting World Cup results, doing pre-match analysis, or when the user mentions 比分预测, 世界杯预测, 足球预测, match prediction, score forecast.
+  Multi-source football match score prediction engine for World Cup and other international tournaments. Predicts match score, total corners, and cards (yellow/red). Replaces Chinese pundit consensus with three-layer weighted sources: betting Correct Score market (40%), AI statistical models like Opta (35%), and international analyst consensus (25%). Applies five-dimensional correction factors (league quality, tactics, tournament stage, history, venue) for scores, plus independent factor sets for corners and cards. Use when predicting match scores, analyzing football fixtures, forecasting World Cup results, doing pre-match analysis, or when the user mentions 比分预测, 世界杯预测, 足球预测, 角球预测, 得牌预测, match prediction, score forecast, corner prediction, card prediction.
 ---
 
 # World Cup Multi-Source Predictor
 
-Predict football match scores using a three-layer weighted consensus model with five-dimensional correction factors. This replaces unreliable single-source predictions (e.g., Chinese pundits who can't publicly predict due to broadcasting contracts) with a robust multi-signal approach.
+Predict football match scores, corners, and cards using a three-layer weighted consensus model with five-dimensional correction factors. This replaces unreliable single-source predictions with a robust multi-signal approach.
+
+## What This Skill Predicts
+
+| Dimension | Method | Key Factors |
+|---|---|---|
+| **比分 (Score)** | 3-layer consensus + A-E correction factors | League quality, tactics, stage, H2H, venue |
+| **角球数 (Corners)** | 3-layer consensus + F1-F4 corner factors | Wing play, possession, tempo, set-piece reliance |
+| **得牌数 (Cards)** | 3-layer consensus + G1-G5 card factors | Defensive aggression, referee strictness, match importance, rivalry |
 
 ## Quick Start
 
@@ -90,12 +98,41 @@ For Feishu delivery:
 - Include the three-layer source breakdown table and final prediction table
 - Add a comparison callout if this is a refresh vs. previous prediction
 
+### Step 5: Predict Corners & Cards (Supplementary)
+
+After delivering the score prediction, offer to predict corners and cards. These use the same three-layer architecture but with their own factor sets.
+
+#### Corner Prediction Workflow
+
+1. **Collect corner data**: Search for team corner stats (last 10 matches), corners Over/Under lines, wing-play tactics
+2. **Apply corner factors**: Read [`references/corner-card-factors.md`](references/corner-card-factors.md) section "Corners"
+   - F1 Wing Play (1.0): teams with ≥2 wide attackers → +1 corner
+   - F2 Possession Gap (1.2): dominant team → +1, underdog → opponent +1
+   - F3 Match Tempo (0.8): high press → +1 total, slow buildup → -1 total
+   - F4 Set-Piece Reliance (1.0): ≥25% goals from set pieces → +1
+3. **Output**: Total corners range + home/away split + Over/Under confidence
+
+#### Card Prediction Workflow
+
+1. **CRITICAL — find the referee first**: Referee card rate is the single biggest variable. Search for:
+   - Referee name, nationality, average cards/game
+   - Recent tournament history and disciplinary style
+2. **Collect team card stats**: Average cards per game (last 10), fouls committed/drawn
+3. **Apply card factors**: Read [`references/corner-card-factors.md`](references/corner-card-factors.md) section "Cards"
+   - G1 Defensive Aggression (1.2): ≥2.5 cards/game → +1
+   - G2 Referee Strictness (1.5): above/below average → ±1 total
+   - G3 Match Importance (1.0): knockout/must-win → +1 total
+   - G4 Rivalry (0.8): physical matchup or derby → +1 total
+   - G5 Key Player Risk (0.6): yellow accumulation risk → +0.5
+4. **Output**: Cards count range + booking points + home/away split + referee note
+
 ## Key Principles
 
-- **Parallel collection**: always spawn 3 concurrent research sub-agents for the three layers
-- **Real data preferred**: when Correct Score odds are available near kickoff, use them over model estimates
+- **Parallel collection**: always spawn concurrent research sub-agents — 3 for score layers, can add 2 more for corner/card data
+- **Real data preferred**: when betting odds are available near kickoff, use them over model estimates
 - **Layer independence**: each layer works standalone — if one fails, engine still runs with remaining layers
 - **Direction matters**: correction factors apply per-direction; draws are direction-neutral
+- **Referee first for cards**: never predict cards without finding the referee assignment — it's the single highest-impact variable
 
 ## Edge Cases
 
@@ -103,3 +140,4 @@ For Feishu delivery:
 - **Pre-matchday 1**: Correct Score odds may be model estimates, not live. Flag this.
 - **Single model**: if only Opta is available (no FiveThirtyEight), use it alone at full 35% weight.
 - **Tied scores**: when multiple scores have equal final scores, rank all as tied — don't force a tiebreak.
+- **No referee announced**: if referee not yet assigned, flag card prediction as "preliminary — pending referee confirmation" and use league-average card rate as placeholder.

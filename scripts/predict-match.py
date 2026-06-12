@@ -225,6 +225,158 @@ def generate_report(
     return "\n".join(lines)
 
 
+# ─── Step 5: Corner Prediction ────────────────────────────────────
+
+@dataclass
+class CornerPrediction:
+    total_low: int
+    total_high: int
+    home_corners: float
+    away_corners: float
+    over_confidence: str  # 高/中/低
+    factors: dict = field(default_factory=dict)
+
+CORNER_FACTORS = {
+    "F1": {"name": "边路进攻", "weight": 1.0},
+    "F2": {"name": "控球差距", "weight": 1.2},
+    "F3": {"name": "比赛节奏", "weight": 0.8},
+    "F4": {"name": "定位球依赖", "weight": 1.0},
+}
+
+
+def predict_corners(team_stats: dict, corner_factors: dict) -> CornerPrediction:
+    """
+    Predict corner count based on team stats and corner factors.
+
+    team_stats: {
+        "home": {"avg_corners": 5.2, "possession": 52, "crosses": 18, "set_piece_goals_pct": 22},
+        "away": {"avg_corners": 4.1, "possession": 48, "crosses": 12, "set_piece_goals_pct": 15},
+    }
+    corner_factors: {"F1_home": +1, "F2_home": 0, ...}
+    """
+    base_total = team_stats.get("home", {}).get("avg_corners", 5.0) + team_stats.get("away", {}).get("avg_corners", 4.5)
+
+    # Apply weighted corrections
+    correction = 0.0
+    for key, val in corner_factors.items():
+        factor_id = key.split("_")[0]
+        if factor_id in CORNER_FACTORS:
+            correction += val * CORNER_FACTORS[factor_id]["weight"]
+
+    adjusted = base_total + correction
+    total_low = max(4, int(adjusted - 1.5))
+    total_high = int(adjusted + 1.5)
+
+    # Home/away split based on possession ratio
+    home_poss = team_stats.get("home", {}).get("possession", 50)
+    away_poss = team_stats.get("away", {}).get("possession", 50)
+    ratio = home_poss / (home_poss + away_poss) if (home_poss + away_poss) > 0 else 0.5
+
+    home_corners = round(adjusted * ratio, 1)
+    away_corners = round(adjusted * (1 - ratio), 1)
+
+    conf = "高" if abs(correction) <= 1.0 else "中" if abs(correction) <= 2.5 else "低"
+
+    return CornerPrediction(
+        total_low=total_low,
+        total_high=total_high,
+        home_corners=home_corners,
+        away_corners=away_corners,
+        over_confidence=conf,
+        factors=corner_factors,
+    )
+
+
+# ─── Step 6: Card Prediction ───────────────────────────────────────
+
+@dataclass
+class CardPrediction:
+    total_low: int
+    total_high: int
+    home_cards: float
+    away_cards: float
+    booking_points_low: int
+    booking_points_high: int
+    red_card_risk: str  # 高/中/低
+    over_confidence: str
+    referee_note: str = ""
+    factors: dict = field(default_factory=dict)
+
+CARD_FACTORS = {
+    "G1": {"name": "防守侵略性", "weight": 1.2},
+    "G2": {"name": "裁判严格度", "weight": 1.5},
+    "G3": {"name": "比赛重要性", "weight": 1.0},
+    "G4": {"name": "对抗/德比", "weight": 0.8},
+    "G5": {"name": "关键球员风险", "weight": 0.6},
+}
+
+
+def predict_cards(team_stats: dict, card_factors: dict, referee: dict) -> CardPrediction:
+    """
+    Predict card count and booking points.
+
+    team_stats: {
+        "home": {"avg_cards": 2.1, "avg_fouls": 14},
+        "away": {"avg_cards": 1.8, "avg_fouls": 12},
+    }
+    card_factors: {"G1_home": +1, "G2_total": +1, ...}
+    referee: {"name": "John Smith", "avg_cards": 4.2, "nationality": "ENG"}
+    """
+    base_home = team_stats.get("home", {}).get("avg_cards", 2.0)
+    base_away = team_stats.get("away", {}).get("avg_cards", 1.8)
+    base_total = base_home + base_away
+
+    # Apply weighted corrections
+    correction_home = 0.0
+    correction_away = 0.0
+    correction_total = 0.0
+
+    for key, val in card_factors.items():
+        parts = key.split("_")
+        factor_id = parts[0]
+        direction = parts[1] if len(parts) > 1 else "total"
+        if factor_id in CARD_FACTORS:
+            w = CARD_FACTORS[factor_id]["weight"]
+            if direction == "home":
+                correction_home += val * w
+            elif direction == "away":
+                correction_away += val * w
+            else:
+                correction_total += val * w
+
+    # Referee adjustment: normalize team averages toward referee average
+    ref_avg = referee.get("avg_cards", 3.5)
+    league_avg = 3.5  # typical league average
+    ref_bias = (ref_avg - league_avg) * CARD_FACTORS["G2"]["weight"]
+
+    adjusted_home = base_home + correction_home + ref_bias * 0.5
+    adjusted_away = base_away + correction_away + ref_bias * 0.5
+    adjusted_total = adjusted_home + adjusted_away + correction_total
+
+    total_low = max(1, int(adjusted_total - 1))
+    total_high = int(adjusted_total + 1)
+
+    # Booking points (yellow=10, red=25)
+    booking_low = max(10, total_low * 10)
+    booking_high = total_high * 10 + 15  # potential red card bump
+
+    red_risk = "高" if adjusted_total > 5.0 else "中" if adjusted_total > 3.5 else "低"
+    conf = "高" if abs(correction_total + ref_bias) <= 1.0 else "中" if abs(correction_total + ref_bias) <= 2.5 else "低"
+
+    return CardPrediction(
+        total_low=total_low,
+        total_high=total_high,
+        home_cards=round(adjusted_home, 1),
+        away_cards=round(adjusted_away, 1),
+        booking_points_low=booking_low,
+        booking_points_high=booking_high,
+        red_card_risk=red_risk,
+        over_confidence=conf,
+        referee_note=f"主裁 {referee.get('name', 'Unknown')} ({referee.get('nationality', '')})，场均 {ref_avg} 张牌",
+        factors=card_factors,
+    )
+
+
 # ─── Main ──────────────────────────────────────────────────────────
 
 def main():
@@ -242,6 +394,14 @@ def main():
     parser.add_argument("--direction", default="draw", choices=["home", "draw", "away"],
                        help="修正方向")
     parser.add_argument("--output", default="-", help="输出文件 (- 为 stdout)")
+    # Corner & Card options
+    parser.add_argument("--corners", action="store_true", help="预测角球数")
+    parser.add_argument("--corner-stats", help="角球统计数据 JSON")
+    parser.add_argument("--corner-factors", default="0,0,0,0", help="角球修正因子 F1,F2,F3,F4")
+    parser.add_argument("--cards", action="store_true", help="预测得牌数")
+    parser.add_argument("--card-stats", help="得牌统计数据 JSON")
+    parser.add_argument("--card-factors", default="0,0,0,0,0", help="得牌修正因子 G1,G2,G3,G4,G5")
+    parser.add_argument("--referee", help="裁判数据 JSON: {name, nationality, avg_cards}")
     args = parser.parse_args()
 
     context = MatchContext(
@@ -303,6 +463,79 @@ def main():
     # Step 4: Report
     report = generate_report(context, consensus, final, corrections)
 
+    # Initialize JSON summary
+    json_summary = {
+        "context": {k: v for k, v in context.__dict__.items()},
+        "consensus": consensus[:3],
+        "final": final[:3],
+    }
+
+    # Generate corner prediction
+    if args.corners and args.corner_stats:
+        with open(args.corner_stats) as f:
+            corner_stats = json.load(f)
+        cf_vals = [float(x) for x in args.corner_factors.split(",")]
+        corner_factors = {
+            f"F1_home": cf_vals[0] if len(cf_vals) > 0 else 0,
+            f"F2_home": cf_vals[1] if len(cf_vals) > 1 else 0,
+            f"F3_total": cf_vals[2] if len(cf_vals) > 2 else 0,
+            f"F4_home": cf_vals[3] if len(cf_vals) > 3 else 0,
+        }
+        cp = predict_corners(corner_stats, corner_factors)
+        corner_report = f"""
+## ▎角球预测
+
+| 指标 | 预测 |
+|---|---|
+| 预估总角球 | {cp.total_low}-{cp.total_high} 个 |
+| {context.home_team} 角球 | ~{cp.home_corners} 个 |
+| {context.away_team} 角球 | ~{cp.away_corners} 个 |
+| 置信度 | {cp.over_confidence} |
+"""
+        report += corner_report
+        json_summary["corners"] = {
+            "total_low": cp.total_low, "total_high": cp.total_high,
+            "home": cp.home_corners, "away": cp.away_corners,
+            "confidence": cp.over_confidence,
+        }
+
+    # Generate card prediction
+    if args.cards and args.card_stats and args.referee:
+        with open(args.card_stats) as f:
+            card_stats = json.load(f)
+        with open(args.referee) as f:
+            referee = json.load(f)
+        gf_vals = [float(x) for x in args.card_factors.split(",")]
+        card_factors = {}
+        factor_names = ["G1_home", "G2_total", "G3_total", "G4_total", "G5_home"]
+        for i, name in enumerate(factor_names):
+            if i < len(gf_vals) and gf_vals[i] != 0:
+                card_factors[name] = gf_vals[i]
+        cp_cards = predict_cards(card_stats, card_factors, referee)
+        card_report = f"""
+## ▎得牌预测
+
+| 指标 | 预测 |
+|---|---|
+| 预估总牌数 | {cp_cards.total_low}-{cp_cards.total_high} 张 |
+| Booking Points | {cp_cards.booking_points_low}-{cp_cards.booking_points_high} |
+| {context.home_team} 得牌 | ~{cp_cards.home_cards} 张 |
+| {context.away_team} 得牌 | ~{cp_cards.away_cards} 张 |
+| 红牌风险 | {cp_cards.red_card_risk} |
+| 置信度 | {cp_cards.over_confidence} |
+| 裁判 | {cp_cards.referee_note} |
+"""
+        report += card_report
+        json_summary["cards"] = {
+            "total_low": cp_cards.total_low, "total_high": cp_cards.total_high,
+            "home": cp_cards.home_cards, "away": cp_cards.away_cards,
+            "booking_points": f"{cp_cards.booking_points_low}-{cp_cards.booking_points_high}",
+            "red_card_risk": cp_cards.red_card_risk,
+            "referee": cp_cards.referee_note,
+            "confidence": cp_cards.over_confidence,
+        }
+
+    # Write output AFTER all sections are appended
     if args.output == "-":
         print(report)
     else:
@@ -310,12 +543,6 @@ def main():
             f.write(report)
         print(f"✅ Report saved to {args.output}", file=sys.stderr)
 
-    # Also print JSON summary
-    json_summary = {
-        "context": {k: v for k, v in context.__dict__.items()},
-        "consensus": consensus[:3],
-        "final": final[:3],
-    }
     json_path = args.output.replace(".md", ".json") if args.output != "-" else "/dev/stdout"
     if args.output != "-":
         with open(json_path, "w") as f:
